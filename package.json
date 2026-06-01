@@ -1,0 +1,16 @@
+{
+  "name": "trump-trade-agent",
+  "version": "1.0.0",
+  "description": "Auto-scanning Trump stock mention trade alert agent",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.0",
+    "express": "^4.18.2"
+  }
+}
