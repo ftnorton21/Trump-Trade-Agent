@@ -82,6 +82,9 @@ If no relevant signal found respond ONLY with:
     console.log(`[${new Date().toISOString()}] SIGNAL #${signalCount}: ${result.ticker} ${result.direction} — ${result.confirmationType}`);
     console.log(`  Reason: ${result.reason}`);
     console.log(`  Source: ${result.source}`);
+
+    // Send Discord notification
+    await sendDiscordAlert(result, signalCount);
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Scan #${scanId} error:`, err.message);
     const scan = state.scans.find((s) => s.id === scanId);
@@ -100,6 +103,71 @@ async function start() {
 
   // Then on interval
   setInterval(scan, INTERVAL_MINS * 60 * 1000);
+}
+
+async function sendDiscordAlert(result, signalNum) {
+  const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
+  if (!webhookUrl) {
+    console.log("No Discord webhook set, skipping notification.");
+    return;
+  }
+
+  const color = result.direction === "BUY" ? 0x4dffaa : 0xff4d4d;
+  const confirmed = result.confirmed
+    ? `✅ Confirmed — ${result.confirmationType}`
+    : `⚠️ Unconfirmed — wait for confirmation`;
+
+  const payload = {
+    username: "Trump Trade Agent",
+    avatar_url: "https://upload.wikimedia.org/wikipedia/commons/thumb/5/56/White_shark.jpg/800px-White_shark.jpg",
+    embeds: [
+      {
+        title: `🚨 Signal #${signalNum} — ${result.direction} $${result.ticker}`,
+        description: result.reason,
+        color,
+        fields: [
+          { name: "Company", value: result.companyName, inline: true },
+          { name: "Direction", value: result.direction, inline: true },
+          { name: "Entry Range", value: result.entryRange, inline: true },
+          { name: "Stop Loss", value: result.stopLoss, inline: true },
+          { name: "Target", value: result.target, inline: true },
+          { name: "Confirmation", value: confirmed, inline: false },
+          { name: "Source", value: result.source, inline: false },
+        ],
+        footer: { text: "Trump Trade Agent • Moderate Risk • Volume Confirmation" },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  };
+
+  try {
+    const https = require("https");
+    const body = JSON.stringify(payload);
+    const url = new URL(webhookUrl);
+
+    await new Promise((resolve, reject) => {
+      const req = https.request(
+        {
+          hostname: url.hostname,
+          path: url.pathname + url.search,
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          console.log(`Discord notification sent. Status: ${res.statusCode}`);
+          resolve();
+        }
+      );
+      req.on("error", reject);
+      req.write(body);
+      req.end();
+    });
+  } catch (err) {
+    console.error("Discord webhook error:", err.message);
+  }
 }
 
 module.exports = { start, state, getStats: () => ({ scanCount, signalCount, lastSignal }) };
