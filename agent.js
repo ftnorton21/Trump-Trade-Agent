@@ -1,15 +1,12 @@
 const Anthropic = require("@anthropic-ai/sdk");
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-const INTERVAL_MINS = parseInt(process.env.SCAN_INTERVAL_MINS || "60");
 const CONFIRM_MODE = process.env.CONFIRM_MODE || "volume";
 
 let scanCount = 0;
 let signalCount = 0;
 let lastSignal = null;
 
-// In-memory store for the dashboard to read
 const state = {
   scans: [],
   signals: [],
@@ -17,19 +14,31 @@ const state = {
   startedAt: new Date().toISOString(),
 };
 
-async function scan() {
+// Scan times in UTC (NZT = UTC+12)
+// NZT 11:00pm = UTC 11:00
+// NZT 1:00am  = UTC 13:00
+// NZT 4:00am  = UTC 16:00
+// NZT 8:00am  = UTC 20:00
+const SCAN_TIMES_UTC = [
+  { hour: 11, minute: 0, label: "NZT 11pm — US pre-market (Trump morning posts)" },
+  { hour: 13, minute: 0, label: "NZT 1am  — US market open" },
+  { hour: 16, minute: 0, label: "NZT 4am  — US afternoon / press briefings" },
+  { hour: 20, minute: 0, label: "NZT 8am  — US post-market / Truth Social evening" },
+];
+
+async function scan(label) {
   scanCount++;
   const scanId = scanCount;
   const timestamp = new Date().toISOString();
 
-  console.log(`[${timestamp}] Scan #${scanId} starting...`);
-  state.scans.push({ id: scanId, timestamp, status: "searching" });
+  console.log(`[${timestamp}] Scan #${scanId} — ${label}`);
+  state.scans.push({ id: scanId, timestamp, status: "searching", label });
 
   const prompt = `You are a financial signal agent monitoring US stock trade opportunities based on Trump statements.
 
-Search the web for the VERY LATEST news (today or this week) where Donald Trump has mentioned, recommended, or talked positively or negatively about a specific US-listed stock, company, or sector.
+Search the web for the VERY LATEST news (today or this week) where Donald Trump has mentioned, recommended, or talked positively or negatively about a specific US-listed stock, company, or sector. Also check for any crypto mentions including Bitcoin, Ethereum, or specific crypto projects.
 
-Keywords to flag: buy, great stock, recommend, invest, beautiful company, going to explode, tremendous, believe in, great company, tariff impact on specific company
+Keywords to flag: buy, great stock, recommend, invest, beautiful company, going to explode, tremendous, believe in, great company, tariff impact on specific company, crypto, Bitcoin, strategic reserve
 
 Confirmation requirement: ${
     CONFIRM_MODE === "volume"
@@ -62,12 +71,8 @@ If no relevant signal found respond ONLY with:
 
     const result = JSON.parse(jsonMatch[0]);
 
-    // Update scan record
-    const scan = state.scans.find((s) => s.id === scanId);
-    if (scan) {
-      scan.status = "done";
-      scan.found = result.found;
-    }
+    const scanRecord = state.scans.find((s) => s.id === scanId);
+    if (scanRecord) { scanRecord.status = "done"; scanRecord.found = result.found; }
 
     if (!result.found) {
       console.log(`[${new Date().toISOString()}] Scan #${scanId} — no signal. ${result.reason}`);
@@ -77,40 +82,46 @@ If no relevant signal found respond ONLY with:
     signalCount++;
     lastSignal = { ...result, scanId, timestamp };
     state.signals.unshift(lastSignal);
-    if (state.signals.length > 50) state.signals.pop(); // keep last 50
+    if (state.signals.length > 50) state.signals.pop();
 
     console.log(`[${new Date().toISOString()}] SIGNAL #${signalCount}: ${result.ticker} ${result.direction} — ${result.confirmationType}`);
     console.log(`  Reason: ${result.reason}`);
     console.log(`  Source: ${result.source}`);
 
-    // Send Discord notification
-    await sendDiscordAlert(result, signalCount);
+    await sendDiscordAlert(result, signalCount, label);
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Scan #${scanId} error:`, err.message);
-    const scan = state.scans.find((s) => s.id === scanId);
-    if (scan) scan.status = "error";
+    const scanRecord = state.scans.find((s) => s.id === scanId);
+    if (scanRecord) scanRecord.status = "error";
   }
+}
+
+function scheduleScans() {
+  console.log("Scheduled scan windows (UTC):");
+  SCAN_TIMES_UTC.forEach(({ hour, minute, label }) => {
+    console.log(`  ${String(hour).padStart(2,"0")}:${String(minute).padStart(2,"0")} — ${label}`);
+  });
+  console.log("---");
+
+  setInterval(() => {
+    const now = new Date();
+    const utcHour = now.getUTCHours();
+    const utcMinute = now.getUTCMinutes();
+    const match = SCAN_TIMES_UTC.find((t) => t.hour === utcHour && t.minute === utcMinute);
+    if (match) scan(match.label);
+  }, 60 * 1000);
 }
 
 async function start() {
-  console.log(`Trump Trade Agent starting...`);
-  console.log(`Interval: every ${INTERVAL_MINS} minutes`);
+  console.log("Trump Trade Agent starting...");
   console.log(`Confirmation mode: ${CONFIRM_MODE}`);
-  console.log(`---`);
-
-  // Run immediately on start
-  await scan();
-
-  // Then on interval
-  setInterval(scan, INTERVAL_MINS * 60 * 1000);
+  await scan("Startup scan");
+  scheduleScans();
 }
 
-async function sendDiscordAlert(result, signalNum) {
+async function sendDiscordAlert(result, signalNum, scanLabel) {
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
-  if (!webhookUrl) {
-    console.log("No Discord webhook set, skipping notification.");
-    return;
-  }
+  if (!webhookUrl) { console.log("No Discord webhook set, skipping."); return; }
 
   const color = result.direction === "BUY" ? 0x4dffaa : 0xff4d4d;
   const confirmed = result.confirmed
@@ -119,48 +130,40 @@ async function sendDiscordAlert(result, signalNum) {
 
   const payload = {
     username: "Trump Trade Agent",
-    avatar_url: "https://upload.wikimedia.org/wikipedia/commons/thumb/5/56/White_shark.jpg/800px-White_shark.jpg",
-    embeds: [
-      {
-        title: `🚨 Signal #${signalNum} — ${result.direction} $${result.ticker}`,
-        description: result.reason,
-        color,
-        fields: [
-          { name: "Company", value: result.companyName, inline: true },
-          { name: "Direction", value: result.direction, inline: true },
-          { name: "Entry Range", value: result.entryRange, inline: true },
-          { name: "Stop Loss", value: result.stopLoss, inline: true },
-          { name: "Target", value: result.target, inline: true },
-          { name: "Confirmation", value: confirmed, inline: false },
-          { name: "Source", value: result.source, inline: false },
-        ],
-        footer: { text: "Trump Trade Agent • Moderate Risk • Volume Confirmation" },
-        timestamp: new Date().toISOString(),
-      },
-    ],
+    embeds: [{
+      title: `🚨 Signal #${signalNum} — ${result.direction} $${result.ticker}`,
+      description: result.reason,
+      color,
+      fields: [
+        { name: "Company", value: result.companyName, inline: true },
+        { name: "Direction", value: result.direction, inline: true },
+        { name: "Urgency", value: result.urgency?.toUpperCase() || "—", inline: true },
+        { name: "Entry Range", value: result.entryRange, inline: true },
+        { name: "Stop Loss", value: result.stopLoss, inline: true },
+        { name: "Target", value: result.target, inline: true },
+        { name: "Confirmation", value: confirmed, inline: false },
+        { name: "Source", value: result.source, inline: false },
+        { name: "Scan Window", value: scanLabel, inline: false },
+      ],
+      footer: { text: "Trump Trade Agent • Moderate Risk • Volume Confirmation" },
+      timestamp: new Date().toISOString(),
+    }],
   };
 
   try {
     const https = require("https");
     const body = JSON.stringify(payload);
     const url = new URL(webhookUrl);
-
     await new Promise((resolve, reject) => {
-      const req = https.request(
-        {
-          hostname: url.hostname,
-          path: url.pathname + url.search,
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Content-Length": Buffer.byteLength(body),
-          },
-        },
-        (res) => {
-          console.log(`Discord notification sent. Status: ${res.statusCode}`);
-          resolve();
-        }
-      );
+      const req = https.request({
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+      }, (res) => {
+        console.log(`Discord notification sent. Status: ${res.statusCode}`);
+        resolve();
+      });
       req.on("error", reject);
       req.write(body);
       req.end();
